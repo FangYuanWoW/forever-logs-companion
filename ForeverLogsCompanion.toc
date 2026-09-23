@@ -1,0 +1,17 @@
+## Interface: 16001
+## Title: Forever Logs Companion
+## Author: FangYuanWoW
+## Version: 0.2.0
+## Notes: Starts /combatlog when you enter a dungeon or raid, for uploading to Forever Logs.
+## SavedVariables: ForeverLogsCompanionDB
+## IconTexture: Interface\AddOns\ForeverLogsCompanion\Media\flame-32
+## DefaultState: Enabled
+
+libs\LibStub.lua
+libs\CallbackHandler-1.0.lua
+libs\LibDataBroker-1.1.lua
+libs\LibDBIcon-1.0.lua
+
+Zones.lua
+ForeverLogsCompanion.lua
+Settings.lua
