@@ -22,7 +22,8 @@ Starts combat logging when you enter a dungeon or raid, so every run is ready to
 - **Asks before it stops.** Leaving a zone where it started logging asks
   whether to stop or keep going (handy between pulls and dungeons).
 - **Silent mode.** Skip both prompts: logging starts on zone entry and stays
-  on until you turn it off yourself.
+  on until you turn it off yourself. In some dungeons WoW Forever only lets
+  logging start from a click, so there the prompt still appears.
 - **Turns on Advanced Combat Logging.** Without it the combat log has no gear,
   talents or stats, and your reports show no specs or item levels.
 - **Leaves your own logging alone.** If you already typed `/combatlog`, it

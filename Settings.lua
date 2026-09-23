@@ -541,7 +541,8 @@ SlashCmdList["FOREVERLOGSCOMPANION"] = function(msg)
   elseif cmd == "status" then
     local c = cfg()
     FLC.say("v" .. FLC.VERSION)
-    print("Current zone: |cffe8e8e8" .. currentZoneName() .. "|r   /combatlog: " .. onOff(FLC.isLogging()))
+    print("Current zone: |cffe8e8e8" .. currentZoneName() .. "|r   /combatlog: " .. onOff(FLC.isLogging())
+      .. " |cff888888(client reports " .. (FLC.clientReportsLogging() and "on" or "off") .. ")|r")
     print("Auto-log on zone entry: " .. onOff(c.auto_combatlog)
       .. "   Silent: " .. onOff(c.silent)
       .. "   Raids: " .. onOff(c.log_raids)
@@ -588,7 +589,7 @@ SlashCmdList["FOREVERLOGSCOMPANION"] = function(msg)
     print("  restrictions: " .. table.concat(rs, ", "))
     print("  LoggingCombat(true): ok=" .. tostring(ok) .. " returned=" .. tostring(r1)
       .. "   logging now: " .. tostring(p.loggingImmediately))
-    for _, delay in ipairs({ 1, 3 }) do
+    for _, delay in ipairs({ 1, 3, 10 }) do
       C_Timer.After(delay, function()
         p["loggingAfter" .. delay .. "s"] = FLC.isLogging()
         print("  logging after " .. delay .. "s: " .. tostring(FLC.isLogging()))
