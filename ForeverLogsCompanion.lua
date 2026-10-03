@@ -19,7 +19,7 @@
 local ADDON, FLC = ...
 _G.ForeverLogsCompanion = FLC
 
-FLC.VERSION = "0.2.1"
+FLC.VERSION = "0.2.2"
 FLC.MEDIA_PATH = "Interface\\AddOns\\ForeverLogsCompanion\\Media\\"
 FLC.ICON = FLC.MEDIA_PATH .. "logo-128.tga"
 
@@ -43,38 +43,59 @@ FLC.pendingZone = nil
 function FLC.say(msg) print(PREFIX .. msg) end
 function FLC.debug(msg) if db and db.debug then print(PREFIX .. "|cff888888" .. msg .. "|r") end end
 
--- WHY THE ADDON TRACKS THE STATE ITSELF: on WoW Forever, LoggingCombat() is
--- not a reliable read. After a /combatlog toggle it keeps reporting the old
--- state for 10s or more, and after a /reload it reports "off" for a while
--- even though the log keeps writing. /combatlog is a toggle, so trusting a
--- false "off" would make the Start button switch logging OFF.
---
--- The client does announce every toggle in chat at once ("Combat being
--- logged to ...", "Combat logging disabled."), so that is the source of
--- truth. It is saved per client session: GetTime() counts from client start,
--- so a /reload (same session) keeps it, and a fresh client launch - which
--- always starts with logging off - discards it. LoggingCombat() is only asked
--- when nothing is known, and to read back the addon's own direct calls,
--- which it does reflect immediately.
-local known  -- true / false / nil (nothing known this session)
+-- Safe tostring: after a client patch a value may arrive as a secret value an
+-- addon cannot compare or print. Says so instead of erroring.
+function FLC.describe(v)
+  if _G.issecretvalue then
+    local ok, secret = pcall(issecretvalue, v)
+    if ok and secret then return "<secret " .. type(v) .. ">" end
+  end
+  local ok, s = pcall(tostring, v)
+  return ok and s or "<unprintable>"
+end
+
+-- Decision trace, kept in SavedVariables (last TRACE_MAX lines, /flc trace)
+-- so a zone-in that did nothing can be read back after logout. Always on; it
+-- is a handful of lines per zone change.
+local TRACE_MAX = 60
+function FLC.trace(msg)
+  FLC.debug(msg)
+  if not db then return end
+  db.trace = db.trace or {}
+  table.insert(db.trace, string.format("%s %.1f %s", date("%H:%M:%S"), GetTime(), msg))
+  while #db.trace > TRACE_MAX do table.remove(db.trace, 1) end
+end
+
+-- " restricted=Map:2,..." for every non-zero addon restriction, "" if none.
+function FLC.restrictionSummary()
+  local RA = _G.C_RestrictedActions
+  local T = Enum and Enum.AddOnRestrictionType
+  if not (RA and RA.GetAddOnRestrictionState and T) then return " restrictions=n/a" end
+  local on = {}
+  for name, id in pairs(T) do
+    local ok, st = pcall(RA.GetAddOnRestrictionState, id)
+    if not ok then on[#on + 1] = name .. ":err"
+    elseif st ~= nil and st ~= 0 then on[#on + 1] = name .. ":" .. FLC.describe(st) end
+  end
+  table.sort(on)
+  return #on > 0 and (" restricted=" .. table.concat(on, ",")) or ""
+end
+
+-- WHY THE ADDON KEEPS ITS OWN STATE, BRIEFLY: LoggingCombat() is not a
+-- reliable read on WoW Forever. It lags every switch by seconds (10+ after a
+-- /combatlog, ~5 after the addon's own call) and reads "off" for a while
+-- after a /reload. Since client build 70124 the "Combat being logged" chat
+-- line reaches addons as a secret value, so it cannot be used either. The
+-- addon trusts its own successful call for KNOWN_FOR seconds (covering the
+-- start retries), then the lagging but self-correcting read takes over.
+-- Nothing is carried across a /reload.
+local KNOWN_FOR = 35  -- seconds; longer than the last start retry
+local known       -- true / false / nil
+local knownAt = 0
 
 local function setKnown(state)
   known = state
-  if db then
-    db.log_state = state
-    db.log_state_clock = GetTime()
-  end
-end
-
--- Restores the saved state when this is the same client session (a /reload).
-local function restoreKnown()
-  local clock = db.log_state_clock
-  if db.log_state ~= nil and clock and GetTime() >= clock then
-    known = db.log_state
-  else
-    known = nil
-    db.log_state, db.log_state_clock = nil, nil
-  end
+  knownAt = GetTime()
 end
 
 local function clientReportsLogging()
@@ -84,43 +105,58 @@ end
 FLC.clientReportsLogging = clientReportsLogging
 
 function FLC.isLogging()
-  if known ~= nil then return known end
+  if known ~= nil and GetTime() - knownAt < KNOWN_FOR then return known end
   return clientReportsLogging()
 end
 
-local function isEnabledMessage(msg)
-  if _G.COMBATLOGENABLED and msg == _G.COMBATLOGENABLED then return true end
-  return msg:find("^Combat being logged") ~= nil
-end
-
-local function isDisabledMessage(msg)
-  if _G.COMBATLOGDISABLED and msg == _G.COMBATLOGDISABLED then return true end
-  return msg:find("^Combat logging disabled") ~= nil
-end
-
--- CHAT_MSG_SYSTEM handler. pcall: under the Chat addon restriction the text
--- may arrive as a value an addon is not allowed to compare.
-function FLC.onSystemMessage(msg)
-  local ok, state = pcall(function()
-    if type(msg) ~= "string" then return nil end
-    if isEnabledMessage(msg) then return true end
-    if isDisabledMessage(msg) then return false end
-    return nil
-  end)
-  if ok and state ~= nil then
-    setKnown(state)
-    FLC.debug("chat says combat logging " .. (state and "on" or "off"))
-  end
-end
-
--- Direct call. It prints nothing in chat, but LoggingCombat() reflects it at
--- once, so record what the client reports right after.
+-- Direct call. It prints nothing in chat. Not a toggle, unlike /combatlog.
 -- Returns pcall's ok + the error text when the call itself was refused.
 local function setLogging(on)
   local ok, err = pcall(LoggingCombat, on)
   FLC.lastSetError = (not ok) and tostring(err) or nil
-  setKnown(clientReportsLogging())
+  if ok then setKnown(on) else setKnown(clientReportsLogging()) end
   return ok, err
+end
+
+-- Direct start, retried until the client confirms. Since client build 70205
+-- an instance holds the "Map" addon restriction, and for a variable time
+-- after the loading screen (about 10s in Ragefire Chasm) the client silently
+-- ignores a start. Later ones work. Each retry while already logging only
+-- writes another COMBAT_LOG_VERSION header into the same file, so retrying
+-- is safe. The secure-button /combatlog this used to rely on no longer
+-- starts anything under that restriction.
+local START_RETRIES = { 3, 6, 10, 15, 20, 30 }
+local CONFIRM_GRACE = 8  -- the read lags a real start by ~5s
+local function directStart()
+  local ok = setLogging(true)
+  FLC.trace("direct LoggingCombat(true): ok=" .. tostring(ok) .. " err=" .. tostring(FLC.lastSetError)
+    .. FLC.restrictionSummary())
+  if not ok then return false end
+  local done = false
+  local function confirmed(delay)
+    if done then return true end
+    if known == false then done = true return true end  -- stopped meanwhile
+    if clientReportsLogging() then
+      done = true
+      FLC.trace("start confirmed by client at +" .. delay .. "s")
+      return true
+    end
+    return false
+  end
+  for _, delay in ipairs(START_RETRIES) do
+    C_Timer.After(delay, function()
+      if confirmed(delay) then return end
+      local again = pcall(LoggingCombat, true)
+      FLC.trace("start retry +" .. delay .. "s: ok=" .. tostring(again) .. FLC.restrictionSummary())
+    end)
+  end
+  local last = START_RETRIES[#START_RETRIES] + CONFIRM_GRACE
+  C_Timer.After(last, function()
+    if confirmed(last) then return end
+    FLC.trace("start never confirmed")
+    FLC.say("|cffff5555Combat logging may not have started.|r Type /combatlog to start it yourself.")
+  end)
+  return true
 end
 
 -- The client only writes COMBATANT_INFO when this is on. Without it an
@@ -155,6 +191,7 @@ local function listState(name)
   end
   return state
 end
+FLC.listState = listState
 
 -- "raid", "dungeon", or nil (open world, a hand-added zone).
 local function contentKind(zoneName)
@@ -197,26 +234,10 @@ local function enforceContentGate(zoneName)
     FLC.say("Combat logging stopped: " .. zoneName .. " is " .. CONTENT_LABEL[blocked]
       .. ", and logging there is turned off.")
   else
-    FLC.debug("Skipping " .. zoneName .. ": logging " .. CONTENT_LABEL[blocked] .. " is turned off.")
+    FLC.trace("Skipping " .. zoneName .. ": logging " .. CONTENT_LABEL[blocked] .. " is turned off.")
   end
   resetState()
   return true
-end
-
--- WHY A SECURE BUTTON: WoW Forever's "Map" addon restriction (active inside
--- some instances) lets an addon call LoggingCombat(true) but the client undoes
--- it within a few seconds. /combatlog run by the PLAYER is not undone. So the
--- prompt's start/stop button is a SecureActionButton whose click runs
--- /combatlog exactly as if the player typed it. The direct call is still used
--- where the restriction is off (silent mode, settings toggles), and falls back
--- to the prompt when it gets undone.
-
-local function mapRestricted()
-  local RA = _G.C_RestrictedActions
-  local T = Enum and Enum.AddOnRestrictionType
-  if not (RA and RA.GetAddOnRestrictionState and T and T.Map) then return false end
-  local ok, st = pcall(RA.GetAddOnRestrictionState, T.Map)
-  return ok and st ~= nil and st ~= 0
 end
 
 local function titleLine()
@@ -224,20 +245,7 @@ local function titleLine()
     .. "|cff555555------------------------------|r\n"
 end
 
--- Calls done(true) as soon as LoggingCombat() reads `want`, or done(false)
--- after `seconds` if it never does. Checks twice a second.
-function FLC.waitForLogging(want, seconds, done)
-  local tries = seconds * 2
-  local function poll()
-    if FLC.isLogging() == want then return done(true) end
-    tries = tries - 1
-    if tries <= 0 then return done(false) end
-    C_Timer.After(0.5, poll)
-  end
-  C_Timer.After(0.5, poll)
-end
-
-local prompt         -- built on first use (out of combat)
+local prompt         -- built on first use
 local pendingPrompt  -- { mode, zone, text } waiting for combat to end
 
 local function onStarted(zoneName)
@@ -266,47 +274,33 @@ local function buildPrompt()
   text:SetWidth(300)
   f.text = text
 
-  -- Secure: its click runs /combatlog as the player.
-  local go = CreateFrame("Button", "ForeverLogsCompanion_PromptGo", f,
-    "SecureActionButtonTemplate, UIPanelButtonTemplate")
+  -- Sets the wanted state directly. It used to be a secure button running
+  -- /combatlog, which since client build 70205 prints "Combat being logged"
+  -- inside an instance but starts nothing, and as a toggle on a lagging read
+  -- could switch logging the wrong way.
+  local go = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
   go:SetSize(130, 22)
   go:SetPoint("BOTTOMRIGHT", f, "BOTTOM", -6, 16)
-  go:SetAttribute("type", "macro")
-  go:SetAttribute("macrotext", "/combatlog")
-  -- Modern clients fire secure buttons on key-down OR key-up per the
-  -- ActionButtonUseKeyDown setting; register both so a click fires once
-  -- whichever it is. /combatlog is a toggle, so PreClick disarms the button
-  -- when logging is already in the wanted state, and PostClick hides the
-  -- prompt so a second phase of the same click lands nowhere.
-  go:RegisterForClicks("AnyUp", "AnyDown")
-  -- LoggingCombat() lags a /combatlog toggle, so the state check alone could
-  -- re-arm a second phase of the same click; ignore any re-fire within 1s.
-  local lastFired = 0
-  go:SetScript("PreClick", function(self)
-    if InCombatLockdown() then return end
-    local want = (f.mode == "start")
-    local armed = FLC.isLogging() ~= want and (GetTime() - lastFired) > 1
-    self:SetAttribute("type", armed and "macro" or nil)
-    if armed then lastFired = GetTime() end
-  end)
-  go:SetScript("PostClick", function()
+  go:SetScript("OnClick", function()
     local mode, zone = f.mode, f.zone
-    if not InCombatLockdown() then f:Hide() end
+    f:Hide()
     local want = (mode == "start")
-    -- Normally the chat line settles this at once; the wait only matters
-    -- when that line is not recognised and LoggingCombat() has to catch up.
-    FLC.waitForLogging(want, 15, function(ok)
-      if mode == "start" then
-        if ok then
-          onStarted(zone)
-        else
-          FLC.say("|cffff5555Combat logging did not start.|r Type /combatlog to start it yourself.")
-        end
-      elseif ok then
-        FLC.say("Combat logging stopped.")
-        FLC.resetState()
+    FLC.trace("prompt " .. tostring(mode) .. " click (isLogging=" .. tostring(FLC.isLogging())
+      .. ", client=" .. tostring(clientReportsLogging()) .. ")" .. FLC.restrictionSummary())
+    if want then
+      if directStart() then
+        onStarted(zone)
+      else
+        FLC.say("|cffff5555Combat logging did not start.|r Type /combatlog to start it yourself.")
       end
-    end)
+    else
+      local ok = setLogging(false)
+      FLC.trace("prompt stop LoggingCombat(false): ok=" .. tostring(ok) .. " err=" .. tostring(FLC.lastSetError))
+      if ok then
+        FLC.say("Combat logging stopped.")
+        resetState()
+      end
+    end
   end)
   f.go = go
 
@@ -320,20 +314,25 @@ local function buildPrompt()
       FLC.popupShownForZone = nil
     end
     FLC.pendingZone = nil
-    if not InCombatLockdown() then f:Hide() end
+    f:Hide()
   end)
   f.no = no
 
   return f
 end
 
--- mode "start" | "stop". A frame holding a secure button cannot be shown or
--- hidden in combat, so a prompt raised mid-fight waits for combat to end.
+-- mode "start" | "stop". A prompt raised mid-fight waits for combat to end,
+-- so it never pops over a pull.
 function FLC.showPrompt(mode, zone, text)
+  -- Several zone checks fire per transition; ask once.
+  if prompt and prompt:IsShown() and prompt.mode == mode and prompt.zone == zone then return end
+  if pendingPrompt and pendingPrompt.mode == mode and pendingPrompt.zone == zone then return end
   if InCombatLockdown() then
+    FLC.trace(mode .. " prompt for " .. tostring(zone) .. " deferred: in combat")
     pendingPrompt = { mode = mode, zone = zone, text = text }
     return
   end
+  FLC.trace(mode .. " prompt shown for " .. tostring(zone))
   prompt = prompt or buildPrompt()
   prompt.mode, prompt.zone = mode, zone
   prompt.text:SetText(text)
@@ -359,32 +358,19 @@ local function showStartPrompt(zoneName, note)
     .. (note and ("\n\n|cffaaaaaa" .. note .. "|r") or ""))
 end
 
--- Direct start, for silent mode and settings toggles. Where the Map
--- restriction would undo it, or if it gets undone anyway, ask for a click.
+-- Direct start, for silent mode and settings toggles. Falls back to the
+-- prompt only when the call itself is refused.
 function FLC.beginLogging(zoneName)
   ensureAdvancedLogging()
-  if FLC.isLogging() then return end
-  local NEEDS_CLICK = "WoW Forever only lets you start logging here with a click."
-  if mapRestricted() then
-    showStartPrompt(zoneName, NEEDS_CLICK)
+  if FLC.isLogging() then
+    FLC.trace("direct start skipped: already logging")
     return
   end
-  local ok = setLogging(true)
-  if not ok then
-    showStartPrompt(zoneName, NEEDS_CLICK)
-    return
+  if directStart() then
+    onStarted(zoneName)
+  else
+    showStartPrompt(zoneName, "Combat logging could not be started automatically here.")
   end
-  -- The restriction undoes a direct start within ~3s; confirm after that.
-  C_Timer.After(4, function()
-    -- The Map restriction undoes a direct start without a chat line, and
-    -- LoggingCombat() does show that reversal, so re-read it here.
-    if FLC.isLogging() and not clientReportsLogging() then setKnown(false) end
-    if FLC.isLogging() then
-      onStarted(zoneName)
-    else
-      showStartPrompt(zoneName, NEEDS_CLICK)
-    end
-  end)
 end
 
 local function startLogging(zoneName, showPopup)
@@ -393,16 +379,23 @@ local function startLogging(zoneName, showPopup)
     -- without toggling anything.
     ensureAdvancedLogging()
     FLC.lastLoggedZone = zoneName
-    FLC.debug("Combat log already on for " .. zoneName .. ".")
+    FLC.trace("no prompt for " .. zoneName .. ": already logging (known=" .. tostring(known)
+      .. ", client=" .. tostring(clientReportsLogging()) .. ")")
     return
   end
-  if not db.auto_combatlog then return end
+  if not db.auto_combatlog then
+    FLC.trace("no prompt for " .. zoneName .. ": auto-log is off")
+    return
+  end
 
   -- ASK FIRST: the client opens a new dated log file on every off->on
   -- switch, so start-then-decline would leave stub files behind. Only on a
   -- main zone change, and once per zone entry.
   if showPopup then
-    if FLC.popupShownForZone == zoneName then return end
+    if FLC.popupShownForZone == zoneName then
+      FLC.trace("no prompt for " .. zoneName .. ": already asked this entry")
+      return
+    end
     ensureAdvancedLogging()
     showStartPrompt(zoneName)
     return
@@ -415,10 +408,18 @@ end
 function FLC.check(isMainZoneChange)
   if not db then return end
   local zone = FLC.currentZone()
+  local _, instanceType = IsInInstance()
+  FLC.trace("check(" .. tostring(isMainZoneChange) .. ") zone=" .. FLC.describe(zone)
+    .. " type=" .. FLC.describe(instanceType) .. " listed=" .. tostring(listState(zone))
+    .. " last=" .. tostring(FLC.lastLoggedZone) .. " known=" .. tostring(known)
+    .. " client=" .. tostring(clientReportsLogging()) .. FLC.restrictionSummary())
   if zone == "" then return end
 
   if not enforceContentGate(zone) then
     local monitored = isMonitored(zone)
+    -- "Once per zone entry": leaving the zone ends the entry, so walking back
+    -- in asks again.
+    if not monitored and isMainZoneChange then FLC.popupShownForZone = nil end
     if monitored and FLC.lastLoggedZone ~= zone then
       startLogging(zone, isMainZoneChange and not db.silent)
     elseif not monitored and FLC.lastLoggedZone and FLC.startedByUs
@@ -446,7 +447,7 @@ end
 
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
-frame:SetScript("OnEvent", function(_, event, arg1)
+frame:SetScript("OnEvent", function(_, event, arg1, arg2)
   if event == "ADDON_LOADED" then
     if arg1 ~= ADDON then return end
     ForeverLogsCompanionDB = ForeverLogsCompanionDB or {}
@@ -463,25 +464,36 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     end
     -- LibDBIcon position/visibility, same shape the other companions use.
     db.minimap_button = db.minimap_button or { hide = false, minimapPos = 200 }
-    restoreKnown()
+    -- 0.2.1 saved the logging state across sessions; that is gone.
+    db.log_state, db.log_state_clock = nil, nil
     frame:UnregisterEvent("ADDON_LOADED")
     frame:RegisterEvent("PLAYER_ENTERING_WORLD")
     frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
     frame:RegisterEvent("PLAYER_REGEN_ENABLED")
-    frame:RegisterEvent("CHAT_MSG_SYSTEM")
+    frame:RegisterEvent("ADDON_ACTION_BLOCKED")
+    frame:RegisterEvent("ADDON_ACTION_FORBIDDEN")
+    local version, build = GetBuildInfo()
+    FLC.trace("loaded v" .. FLC.VERSION .. " on client " .. tostring(version) .. "." .. tostring(build)
+      .. " client=" .. tostring(clientReportsLogging()))
     if FLC.onLoaded then FLC.onLoaded() end
-    return
-  end
-  if event == "CHAT_MSG_SYSTEM" then
-    FLC.onSystemMessage(arg1)
     return
   end
   if event == "PLAYER_REGEN_ENABLED" then
     FLC.flushPendingPrompt()
     return
   end
-  FLC.check(true)
+  if event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN" then
+    if arg1 == ADDON then FLC.trace(event .. ": " .. FLC.describe(arg2)) end
+    return
+  end
+  -- A client patch can make a zone API return a value the addon may not
+  -- compare; trace the error rather than silently doing nothing.
+  local function safeCheck()
+    local ok, err = pcall(FLC.check, true)
+    if not ok then FLC.trace("check error (" .. event .. "): " .. FLC.describe(err)) end
+  end
+  safeCheck()
   -- PLAYER_ENTERING_WORLD can fire before instance info is ready behind the
   -- loading screen; look again shortly. popupShownForZone keeps it to one ask.
-  C_Timer.After(2, function() FLC.check(true) end)
+  C_Timer.After(2, safeCheck)
 end)

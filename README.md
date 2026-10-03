@@ -22,8 +22,11 @@ Starts combat logging when you enter a dungeon or raid, so every run is ready to
 - **Asks before it stops.** Leaving a zone where it started logging asks
   whether to stop or keep going (handy between pulls and dungeons).
 - **Silent mode.** Skip both prompts: logging starts on zone entry and stays
-  on until you turn it off yourself. In some dungeons WoW Forever only lets
-  logging start from a click, so there the prompt still appears.
+  on until you turn it off yourself.
+- **Keeps trying until it sticks.** Right after you load into a dungeon, WoW
+  Forever ignores logging requests for a few seconds (about 10 in Ragefire
+  Chasm). The addon retries for up to 30 seconds and tells you if logging
+  still did not start.
 - **Turns on Advanced Combat Logging.** Without it the combat log has no gear,
   talents or stats, and your reports show no specs or item levels.
 - **Leaves your own logging alone.** If you already typed `/combatlog`, it
@@ -66,6 +69,7 @@ If a zone doesn't prompt, stand inside it and click **Add Current**.
 | `/flc zone add [name]` | monitor a zone (current zone if no name) |
 | `/flc zone remove <name>` | stop monitoring a zone |
 | `/flc zone list` / `/flc zone reset` | list zones / restore the defaults |
+| `/flc trace [n]` | the last n decisions it made (why it did or didn't start logging) |
 
 ## License
 

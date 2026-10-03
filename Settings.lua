@@ -521,6 +521,7 @@ local function printHelp()
   print("  |cffffd200" .. s .. " settings|r     open window on Settings tab")
   print("  |cffffd200" .. s .. " zones|r        open window on Monitored Zones tab")
   print("  |cffffd200" .. s .. " status|r       show current state")
+  print("  |cffffd200" .. s .. " trace [n]|r    why it did or didn't start logging")
 end
 
 SLASH_FOREVERLOGSCOMPANION1 = "/" .. SLASH
@@ -571,6 +572,19 @@ SlashCmdList["FOREVERLOGSCOMPANION"] = function(msg)
     else
       p.restrictions.api = "C_RestrictedActions.GetAddOnRestrictionState missing"
     end
+    -- What the zone check sees, and the addon's own logging state, taken
+    -- BEFORE the test call below changes anything.
+    local D = FLC.describe
+    local version, build = GetBuildInfo()
+    p.build = tostring(version) .. "." .. tostring(build)
+    local iname, itype2, diff, diffName, _, _, _, mapId = GetInstanceInfo()
+    p.instanceInfo = table.concat({ D(iname), D(itype2), D(diff), D(diffName), D(mapId) }, " | ")
+    p.zoneText = D(GetZoneText())
+    p.listed = tostring(FLC.listState(currentZoneName()))
+    p.clientBefore = FLC.clientReportsLogging()
+    p.flags = "last=" .. tostring(FLC.lastLoggedZone) .. " ours=" .. tostring(FLC.startedByUs)
+      .. " asked=" .. tostring(FLC.popupShownForZone) .. " pending=" .. tostring(FLC.pendingZone)
+
     local ok, r1 = pcall(LoggingCombat, true)
     p.callOk, p.callReturn = ok, tostring(r1)
     p.loggingImmediately = FLC.isLogging()
@@ -587,6 +601,9 @@ SlashCmdList["FOREVERLOGSCOMPANION"] = function(msg)
     for k, v in pairs(p.restrictions) do rs[#rs + 1] = k .. "=" .. v end
     table.sort(rs)
     print("  restrictions: " .. table.concat(rs, ", "))
+    print("  client " .. p.build .. "   instance: " .. p.instanceInfo .. "   zone text: " .. p.zoneText
+      .. "   on list: " .. p.listed)
+    print("  state: client said " .. tostring(p.clientBefore) .. ", " .. p.flags)
     print("  LoggingCombat(true): ok=" .. tostring(ok) .. " returned=" .. tostring(r1)
       .. "   logging now: " .. tostring(p.loggingImmediately))
     for _, delay in ipairs({ 1, 3, 10 }) do
@@ -595,6 +612,13 @@ SlashCmdList["FOREVERLOGSCOMPANION"] = function(msg)
         print("  logging after " .. delay .. "s: " .. tostring(FLC.isLogging()))
       end)
     end
+
+  elseif cmd == "trace" then
+    -- The saved decision trace: why the last zone-ins did or did not start.
+    local t = cfg().trace or {}
+    local n = tonumber(parts[2]) or 15
+    FLC.say("last " .. math.min(n, #t) .. " of " .. #t .. " trace lines:")
+    for i = math.max(1, #t - n + 1), #t do print("  " .. t[i]) end
 
   elseif cmd == "debug" then
     cfg().debug = not cfg().debug
