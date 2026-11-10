@@ -19,7 +19,7 @@
 local ADDON, FLC = ...
 _G.ForeverLogsCompanion = FLC
 
-FLC.VERSION = "0.2.2"
+FLC.VERSION = "0.2.3"
 FLC.MEDIA_PATH = "Interface\\AddOns\\ForeverLogsCompanion\\Media\\"
 FLC.ICON = FLC.MEDIA_PATH .. "logo-128.tga"
 
@@ -457,6 +457,17 @@ frame:SetScript("OnEvent", function(_, event, arg1, arg2)
       if db[k] == nil then db[k] = v end
     end
     db.monitored_zones = db.monitored_zones or {}
+    -- 0.2.3: Azshara is no longer a default zone (it started a log every time
+    -- a player passed through). Drop the copy older versions saved, once, so a
+    -- player who adds it back by hand keeps it.
+    if not db.azshara_dropped then
+      for zone in pairs(db.monitored_zones) do
+        if type(zone) == "string" and zone:lower() == "azshara" then
+          db.monitored_zones[zone] = nil
+        end
+      end
+      db.azshara_dropped = true
+    end
     -- Seed defaults the player has not configured. A removed zone is stored
     -- as false, so it stays removed across sessions.
     for zone, on in pairs(FLC.DEFAULT_ZONES) do

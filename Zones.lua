@@ -23,9 +23,6 @@ for _, name in ipairs({
   "Hyjal Summit", "Hyjal Crater",
   "The Barrow Deeps",
 
-  -- World bosses
-  "Azshara",                 -- Azuregos
-
   -- 5-man dungeons
   "Ragefire Chasm",
   "Deadmines",
@@ -59,6 +56,5 @@ end
 -- Outdoor world-boss zones report instanceType "none", so the "Log raids and
 -- world bosses" switch recognises them by name instead.
 FLC.OUTDOOR_RAID_ZONES = {
-  ["azshara"] = true,
   ["the tainted scar"] = true,
 }
